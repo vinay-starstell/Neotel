@@ -34,16 +34,21 @@ def load_and_standardize(path, dtype, column_map=None):
     df = standardize_columns(df)
     if column_map:
         df.rename(columns={k.lower(): v for k, v in column_map.items()}, inplace=True)
-    # If this is an SMS file and 'date' is not present, extract from path
-    if "sms" in str(path).lower() and "date" not in df.columns:
-        # Try to extract date from parent folder name
-        date_str = Path(path).parent.name
-        try:
-            # Validate/parse date
-            date_val = pd.to_datetime(date_str, errors="coerce").date()
-            df["date"] = date_val
-        except Exception:
-            df["date"] = pd.NaT
+    # Always ensure a 'date' column
+    if "date" not in df.columns or df["date"].isnull().all():
+        # Try to extract from known columns
+        for col in ["call_start_time", "data_requested_time", "sms_date"]:
+            if col in df.columns and not df[col].isnull().all():
+                df["date"] = pd.to_datetime(df[col], errors="coerce").dt.date
+                break
+        # If still missing, extract from folder name
+        if "date" not in df.columns or df["date"].isnull().all():
+            date_str = Path(path).parent.name
+            try:
+                date_val = pd.to_datetime(date_str, errors="coerce").date()
+                df["date"] = date_val
+            except Exception:
+                df["date"] = pd.NaT
     return df
 
 def load_all_inputs(base_dir):
@@ -53,21 +58,21 @@ def load_all_inputs(base_dir):
         'customer_id': 'str', 'imsi': 'str', 'calling_party': 'str', 'called_party': 'str',
         'billing_type': 'str', 'service_type': 'str', 'call_direction': 'str', 'call_category': 'str',
         'call_duration': 'float', "call_start_time": 'str', "call_end_time": 'str', 
-        "available_limit": 'float', "deducted_limit": 'float',"available_onn_calls": 'float', 
-        "consumed_onn_calls": 'float',"available_ofn_calls": 'float',"consumed_ofn_calls": 'float',
+        "available_limit": 'float', "deducted_limit": 'float',"available_onn_calls": 'int', 
+        "consumed_onn_calls": 'int',"available_ofn_calls": 'int',"consumed_ofn_calls": 'int',
         "customer_balance": 'float',"current_consumed_balance":'float',"total_consumed_balance":'float'
     }
     sms_dtypes = {
-        'customer_id': 'str', 'imsi': 'str', 'msisdn': 'str', "sms_receiver": 'str', 'sms_request': 'str', 'billing_type': 'str', 
+        'customer_id': 'str', 'imsi': 'str', 'msisdn': 'str', "sms_receiver": 'str', 'sms_request': 'int', 'billing_type': 'str', 
         'service_type': 'str', 'call_direction': 'str', 'call_category': 'str','date': 'str', 
-        "available_limit": 'float', "deducted_limit": 'float',"available_onn_sms": 'float', 
-        "consumed_onn_sms": 'float',"available_ofn_sms": 'float',"consumed_ofn_sms": 'float'
+        "available_limit": 'float', "deducted_limit": 'float',"available_onn_sms": 'int', 
+        "consumed_onn_sms": 'int',"available_ofn_sms": 'int',"consumed_ofn_sms": 'int'
     }
     data_dtypes = {
         'customer_id': 'str', 'imsi': 'str',  'msisdn': 'str', 'billing_type': 'str', 'service_type': 'str', 
         'call_direction': 'str', 'call_category': 'str', 'data_requested_time': 'str', 
-        'total_consumed_data': 'float', "available_limit": 'float', "deducted_limit": 'float', 
-        "available_data": 'float', "consumed_request": 'float', 
+        'total_consumed_data': 'int', "available_limit": 'float', "deducted_limit": 'float', 
+        "available_data": 'int', "consumed_data": 'int', 'consumed_request': 'int'
     }
 
     dfs = {
@@ -146,7 +151,7 @@ def summarize_usage(df_calls, df_sms, df_data):
             calls["date"] = pd.to_datetime(calls["call_start_time"], errors="coerce").dt.date
         
         # Try to create a 'date' column from the most likely date columns
-        if ("date", "sms_date", "data_requested_time") in sms.columns:
+        if "date" in sms.columns:
             sms["date"] = pd.to_datetime(sms["date"], errors="coerce").dt.date
             
         if "data_requested_time" in data.columns:
@@ -155,27 +160,26 @@ def summarize_usage(df_calls, df_sms, df_data):
         # Filter onnet/offnet outgoing calls/sms
         onnet_outgoing = calls[calls["category"].str.contains("onnet", na=False)] if "category" in calls.columns else pd.DataFrame()
         offnet_outgoing = calls[calls["category"].str.contains("offnet", na=False)] if "category" in calls.columns else pd.DataFrame()
-        # sms_onnet = sms[sms["category"] == "onnet"] if "category" in sms.columns else pd.DataFrame()
-        # sms_offnet = sms[sms["category"] == "offnet"] if "category" in sms.columns else pd.DataFrame()
+        
         sms_onnet = sms[sms["category"].str.contains("onnet", na=False)] if "category" in sms.columns else pd.DataFrame()
         sms_offnet = sms[sms["category"].str.contains("offnet", na=False)] if "category" in sms.columns else pd.DataFrame()
         
         
         # Aggregate metrics (safe for empty DataFrames)
-        if "consumed_onn_calls" in calls.columns and "consumed_ofn_calls" in calls.columns and not calls.empty:
-            voice_outgoing = (calls.groupby("date")["consumed_onn_calls"].sum() + calls.groupby("date")["consumed_ofn_calls"].sum()) / 60
+        if "consumed_onn_calls" in onnet_outgoing.columns and "consumed_ofn_calls" in offnet_outgoing.columns and not calls.empty:
+            voice_outgoing = (onnet_outgoing.groupby("date")["consumed_onn_calls"].sum() + offnet_outgoing.groupby("date")["consumed_ofn_calls"].sum()) / 60
         else:
             voice_outgoing = pd.Series(dtype=float)
         onnet_calls = onnet_outgoing.groupby("date")["consumed_onn_calls"].sum() / 60 if "consumed_onn_calls" in onnet_outgoing.columns and not onnet_outgoing.empty else pd.Series(dtype=float)
         offnet_calls = offnet_outgoing.groupby("date")["consumed_ofn_calls"].sum() / 60 if "consumed_ofn_calls" in offnet_outgoing.columns and not offnet_outgoing.empty else pd.Series(dtype=float)
         
         
-        if "consumed_onn_sms" in sms.columns and "consumed_ofn_sms" in sms.columns and not sms.empty:
-            sms_outgoing = (sms_onnet.groupby("date")["consumed_onn_sms"].sum() + sms_offnet.groupby("date")["consumed_ofn_sms"].sum())
+        if "sms_request" in sms.columns and not sms.empty:
+            sms_outgoing = sms.groupby("date")["sms_request"].sum()
         else:
             sms_outgoing = pd.Series(dtype=float)
-        onn_sms = sms_onnet.groupby("date")["consumed_onn_sms"].sum() if "consumed_onn_sms" in sms_onnet.columns and not sms_onnet.empty else pd.Series(dtype=float)
-        ofn_sms = sms_offnet.groupby("date")["consumed_ofn_sms"].sum() if "consumed_ofn_sms" in sms_offnet.columns and not sms_offnet.empty else pd.Series(dtype=float)
+        onn_sms = sms_onnet.groupby("date")["sms_request"].sum() if "sms_request" in sms_onnet.columns and not sms_onnet.empty else pd.Series(dtype=float)
+        ofn_sms = sms_offnet.groupby("date")["sms_request"].sum() if "sms_request" in sms_offnet.columns and not sms_offnet.empty else pd.Series(dtype=float)
         
         
         total_data = data.groupby("date")["consumed_data"].sum() / 1024**3 if "consumed_data" in data.columns and not data.empty else pd.Series(dtype=float)
