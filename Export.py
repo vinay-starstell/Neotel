@@ -24,7 +24,7 @@ META_COLS = [
     "call_direction", "call_category", "date"
 ]
 
-METRICS_OLS = [
+METRICS_COLS = [
     "balance", "charged", "consumed_data", "consumed_onn_calls", "consumed_ofn_calls", "call_duration", "sms_request"
 ]
 
@@ -57,14 +57,11 @@ def infer_direction(path_parts):
     parts = [p.lower() for p in path_parts]
     if any("outgoing" in p for p in parts):
         return "outgoing"
-    if any("incoming" in p for p in parts):
-    if any("outgoing" in p for p in parts):
-        return "outgoing"
-    if any("incoming" in p for p in parts):
-        return "incoming"
-    if any("data" == p for p in parts):
     if any("data" == p for p in parts):
         return "data"
+    if any("incoming" in p for p in parts):
+        return "incoming"
+
 
 def infer_category(path_parts):
     parts = [p.lower() for p in path_parts]
@@ -148,8 +145,10 @@ def summarize_file(file_path: Path):
         row = {col: latest.get(col) for col in META_COLS if col in latest}
         row.update({"billing_type": billing, "service_type": service, "direction": direction, "category": category, "date":rec_date})
 
-        for col in METRICS_OLS:
+        for col in METRICS_COLS:
             if col == "consumed_data" and col in df.columns:
+                row[col] = df[col].sum()
+            elif col == "consumed_request" and col in df.columns:
                 row[col] = df[col].sum()
             elif col == "consumed_onn_calls" and col in df.columns:
                 row[col] = df[col].sum()
@@ -182,16 +181,12 @@ def process_folder(root_dir, output_dir):
         direction = infer_direction(folder.parts)
         service = infer_service(folder.parts)
         
-        # # Process only outgoing SMS directories
-        # if direction != "outgoing" or service != "sms":
+        # # Process only outgoing & data directories
+        # if direction not in ("outgoing", "data"):
         #     continue 
         
-        # Process only outgoing & data directories
-        if direction not in ("outgoing", "data"):
-            continue 
-        
         # Process only outgoing SMS directories
-        if direction != "outgoing" or service != "sms":
+        if direction != "outgoing" or service not in ("sms", "international call", 'cug call', 'national call'):
             continue  # Only process relevant folders
 
         # Only log when entering a new direction folder
