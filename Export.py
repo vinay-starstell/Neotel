@@ -23,9 +23,9 @@ META_COLS = [
     "customer_id", "imsi", "msisdn", "billing_type", "service_type",
     "call_direction", "call_category", "date"
 ]
-AGGREGATE_COLS = ["call_duration", "sms_request"]
-CUMULATIVE_COLS = [
-    "balance", "charged", "consumed_data", "consumed_onn_calls", "consumed_ofn_calls"
+
+METRICS_OLS = [
+    "balance", "charged", "consumed_data", "consumed_onn_calls", "consumed_ofn_calls", "call_duration", "sms_request"
 ]
 
 def infer_billing(file_path):
@@ -37,7 +37,7 @@ def infer_billing(file_path):
 
 def infer_service(file_path):
     path_str = str(file_path).lower()
-    if "Call" in path_str:
+    if "call" in path_str:
         if "international" in path_str:
             return "internatinal call"
         elif "cug" in path_str:
@@ -140,24 +140,19 @@ def summarize_file(file_path: Path):
         row = {col: latest.get(col) for col in META_COLS if col in latest}
         row.update({"billing_type": billing, "service_type": service, "direction": direction, "category": category, "date":rec_date})
 
-        for col in CUMULATIVE_COLS:
-            if col in df.columns and col in ("consumed_data"):
-                row[f"{col}"] = df[col].sum()
-            elif col in df.columns and col in ("consumed_onn_calls"):
-                row[f"{col}"] = df[col].sum()
-            elif col in df.columns and col in ("consumed_ofn_calls"):
-                row[f"{col}"] = df[col].sum()
+        for col in METRICS_OLS:
+            if col == "consumed_data" and col in df.columns:
+                row[col] = df[col].sum()
+            elif col == "consumed_onn_calls" and col in df.columns:
+                row[col] = df[col].sum()
+            elif col == "consumed_ofn_calls" and col in df.columns:
+                row[col] = df[col].sum()
+            elif col == "sms_request" and col in df.columns:
+                row[col] = df[col].sum()
+            elif col == "call_duration" and col in df.columns:
+                row[col] = df[col].sum() / 60
             else:
-                row[f"{col}"] = 0
-                
-        # row['balance'] = df['balance'].dropna().iloc[-1] if 'balance' in df.columns and not df['balance'].dropna().empty else 0
-        # row['charged'] = df['charged'].dropna().iloc[-1] if 'charged' in df.columns and not df['charged'].dropna().empty else 0
-        
-        for col in AGGREGATE_COLS:
-            if col in df.columns and col in ("sms_request"):
-                row[f"{col}"] = df["sms_request"].sum()
-            elif col in df.columns and col in ("call_duration"):
-                row[f"{col}"] = df["call_duration"].sum()
+                row[col] = 0
 
         return tag, row
 
