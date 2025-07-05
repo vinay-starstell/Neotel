@@ -41,6 +41,8 @@ def infer_service(file_path):
         return "sms"
     if "data" in path_str:
         return "data"
+    if "sms" in path_str:
+        return "sms"
     if "call" in path_str:
         if "international" in path_str:
             return "internatinal call"
@@ -48,13 +50,19 @@ def infer_service(file_path):
             return "cug call"
         else:
             return "national call"
+    if "data" in path_str:
+        return "data"
 
 def infer_direction(path_parts):
     parts = [p.lower() for p in path_parts]
     if any("outgoing" in p for p in parts):
         return "outgoing"
     if any("incoming" in p for p in parts):
+    if any("outgoing" in p for p in parts):
+        return "outgoing"
+    if any("incoming" in p for p in parts):
         return "incoming"
+    if any("data" == p for p in parts):
     if any("data" == p for p in parts):
         return "data"
 
@@ -182,6 +190,10 @@ def process_folder(root_dir, output_dir):
         if direction not in ("outgoing", "data"):
             continue 
         
+        # Process only outgoing SMS directories
+        if direction != "outgoing" or service != "sms":
+            continue  # Only process relevant folders
+
         # Only log when entering a new direction folder
         if folder != last_direction_folder:
             logging.info(f"Processing folder: {folder} (direction: {direction})")
