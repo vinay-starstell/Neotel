@@ -57,7 +57,7 @@ def load_all_inputs(base_dir):
     call_dtypes = {
         'customer_id': 'str', 'imsi': 'str', 'calling_party': 'str', 'called_party': 'str',
         'billing_type': 'str', 'service_type': 'str', 'call_direction': 'str', 'call_category': 'str',
-        'call_duration': 'float', "call_start_time": 'str', "call_end_time": 'str', 
+        "call_start_time": 'str', "call_end_time": 'str', 
         "available_limit": 'float', "deducted_limit": 'float',"available_onn_calls": 'int', 
         "consumed_onn_calls": 'int',"available_ofn_calls": 'int',"consumed_ofn_calls": 'int',
         "customer_balance": 'float',"current_consumed_balance":'float',"total_consumed_balance":'float'
@@ -158,11 +158,11 @@ def summarize_usage(df_calls, df_sms, df_data):
             data["data_requested_time"] = pd.to_datetime(data["data_requested_time"], errors="coerce").dt.date
         
         # Filter onnet/offnet outgoing calls/sms
-        onnet_outgoing = calls[calls["category"].str.contains("onnet", na=False)] if "category" in calls.columns else pd.DataFrame()
-        offnet_outgoing = calls[calls["category"].str.contains("offnet", na=False)] if "category" in calls.columns else pd.DataFrame()
+        onnet_outgoing = calls[calls["subcategory"].str.contains("onnet", na=False)] if "subcategory" in calls.columns else pd.DataFrame()
+        offnet_outgoing = calls[calls["subcategory"].str.contains("offnet", na=False)] if "subcategory" in calls.columns else pd.DataFrame()
         
-        sms_onnet = sms[sms["category"].str.contains("onnet", na=False)] if "category" in sms.columns else pd.DataFrame()
-        sms_offnet = sms[sms["category"].str.contains("offnet", na=False)] if "category" in sms.columns else pd.DataFrame()
+        sms_onnet = sms[sms["subcategory"].astype(str).str.contains("onnet", na=False)] if "subcategory" in sms.columns else pd.DataFrame()
+        sms_offnet = sms[sms["subcategory"].astype(str).str.contains("offnet", na=False)] if "subcategory" in sms.columns else pd.DataFrame()
         
         
         # Aggregate metrics (safe for empty DataFrames)
@@ -182,13 +182,21 @@ def summarize_usage(df_calls, df_sms, df_data):
         ofn_sms = sms_offnet.groupby("date")["sms_request"].sum() if "sms_request" in sms_offnet.columns and not sms_offnet.empty else pd.Series(dtype=float)
         
         
-        total_data = data.groupby("date")["consumed_data"].sum() / 1024**3 if "consumed_data" in data.columns and not data.empty else pd.Series(dtype=float)
+        if "consumed_data" in data.columns:
+            prepaid_data = data.groupby("date")["consumed_data"].sum() / 1024**3 if "consumed_data" in data.columns and not data.empty else pd.Series(dtype=float)
+        if "consumed_request" in data.columns:
+            postpaid_data = data.groupby("date")["consumed_request"].sum() / 1024**3 if "consumed_request" in data.columns and not data.empty else pd.Series(dtype=float)
         
         # Active users
         user_calls = get_user_column(calls) if not calls.empty else pd.DataFrame()
         user_sms = get_user_column(sms) if not sms.empty else pd.DataFrame()
         user_data = get_user_column(data) if not data.empty else pd.DataFrame()
         active_users = pd.concat([user_calls, user_sms, user_data]).drop_duplicates().groupby("date").size() if not (user_calls.empty and user_sms.empty and user_data.empty) else pd.Series(dtype=int)
+        
+        if billing_type == "prepaid":
+            total_data = prepaid_data
+        elif billing_type == "postpaid":
+            total_data = postpaid_data
         
         summary = pd.DataFrame({
             "Voice [Outgoing Mins]": safe_index_to_str(voice_outgoing),

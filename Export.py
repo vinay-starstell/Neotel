@@ -1,4 +1,4 @@
-import json
+import json, yaml
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
@@ -6,6 +6,9 @@ import logging
 from collections import defaultdict
 
 LAUNCH_DAY = datetime(2025, 1, 25).date()  
+TRACKER_FILE = "last_ingested.yaml"                 # To get last refresh date for CDR Logs
+CONFIG_FILE = "config.yaml"                         # Default config file path
+SKIPPED_LOGS = Path("Logs/skipped_files.log")       # See which files are skipped while running.
 
 # Setup logging
 log_file = "Logs/Export.log"
@@ -21,12 +24,34 @@ logging.basicConfig(
 # Define columns
 META_COLS = [
     "customer_id", "imsi", "msisdn", "billing_type", "service_type",
-    "call_direction", "call_category", "date"
+    "direction", "subcategory", "category", "date"
 ]
 
 METRICS_COLS = [
-    "balance", "charged", "consumed_data", "consumed_onn_calls", "consumed_ofn_calls", "call_duration", "sms_request"
+    "balance", "charged", "consumed_data", "consumed_onn_calls", "consumed_ofn_calls", "call_duration", "sms_request", "consumed_request"
 ]
+
+   
+def load_config(path: str = CONFIG_FILE):
+    """Load configuration values from a YAML file."""
+    try:
+        with open(path, "r") as f:
+            return yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        logging.error(f"Config file not found: {path}")
+    except Exception as e:
+        logging.error(f"Failed to load config {path}: {e}")
+    return {}
+
+def load_ingestion_tracker():
+    if Path(TRACKER_FILE).exists():
+        with open(TRACKER_FILE, "r") as f:
+            return yaml.safe_load(f) or {}
+    return {}
+
+def save_ingestion_tracker(tracker):
+    with open(TRACKER_FILE, "w") as f:
+        yaml.safe_dump(tracker, f)
 
 def infer_billing(file_path):
     path_str = str(file_path).lower()
@@ -35,23 +60,14 @@ def infer_billing(file_path):
     elif "postpaid" in path_str:
         return "postpaid"
 
-def infer_service(file_path):
-    path_str = str(file_path).lower()
-    if "sms" in path_str:
+def infer_service(path_parts):
+    parts = [p.lower() for p in path_parts]
+    if "sms" in parts:
         return "sms"
-    if "data" in path_str:
+    if "data" in parts:
         return "data"
-    if "sms" in path_str:
-        return "sms"
-    if "call" in path_str:
-        if "international" in path_str:
-            return "internatinal call"
-        elif "cug" in path_str:
-            return "cug call"
-        else:
-            return "national call"
-    if "data" in path_str:
-        return "data"
+    if "call" in parts:
+        return "call"
 
 def infer_direction(path_parts):
     parts = [p.lower() for p in path_parts]
@@ -61,9 +77,20 @@ def infer_direction(path_parts):
         return "data"
     if any("incoming" in p for p in parts):
         return "incoming"
-
+    
 
 def infer_category(path_parts):
+    parts = [p.lower() for p in path_parts]
+    if "call" in parts:
+        if "international call" in parts:
+            return "international"
+        elif "cug call" in parts:
+            return "cug"
+        else:
+            return "national"
+
+
+def infer_subcategory(path_parts):
     parts = [p.lower() for p in path_parts]
     if "off_net" in parts:
         return "offnet"
@@ -95,6 +122,22 @@ def extract_date_from_path(file_path):
         except Exception:
             continue
     return None
+
+def remove_trailing_date_folder(path: Path) -> str:
+    parts = list(path.parts)
+    last = parts[-1]
+    try:
+        if len(last) == 10:
+            datetime.strptime(last, "%Y-%m-%d")
+        elif len(last) == 7:
+            datetime.strptime(last, "%Y-%m")
+        elif len(last) == 4:
+            datetime.strptime(last, "%Y")
+        else:
+            return str(path)
+        return str(Path(*parts[:-1]))
+    except ValueError:
+        return str(path)
 
 def summarize_file(file_path: Path):
     try:
@@ -135,15 +178,16 @@ def summarize_file(file_path: Path):
 
         # Enrich metadata from path
         direction = infer_direction(file_path.parts)
+        subcategory = infer_subcategory(file_path.parts)
         category = infer_category(file_path.parts)
         billing = infer_billing(file_path)
-        service = infer_service(file_path)
+        service = infer_service(file_path.parts)
 
         tag = f"{billing}_{service}"
 
         # Assemble summary row
         row = {col: latest.get(col) for col in META_COLS if col in latest}
-        row.update({"billing_type": billing, "service_type": service, "direction": direction, "category": category, "date":rec_date})
+        row.update({"billing_type": billing, "service_type": service, "direction": direction, "subcategory": subcategory, "category": category, "date":rec_date})
 
         for col in METRICS_COLS:
             if col == "consumed_data" and col in df.columns:
@@ -167,54 +211,90 @@ def summarize_file(file_path: Path):
         logging.error(f"Error processing {file_path}: {e}")
         return None, None
 
-def process_folder(root_dir, output_dir):
+def process_folder(root_dir, output_dir, include_categories=None, use_tracker=True):
+    if include_categories is None:
+        include_categories = []
+
     root_dir = Path(root_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-
+    
+    normalized_categories = [c.lower() for c in include_categories]
     grouped_rows = defaultdict(list)
+    tracker = load_ingestion_tracker() if use_tracker else {}
+    latest_dates = {}
     last_direction_folder = None
+    
+    
     for folder in root_dir.rglob("*"):
         if not folder.is_dir():
             continue
+        
+        path_str = str(folder).lower()
+        if normalized_categories and not any(cat in path_str for cat in normalized_categories):
+            continue
 
+        folder_key = remove_trailing_date_folder(folder)
         direction = infer_direction(folder.parts)
-        service = infer_service(folder.parts)
-        
-        # # Process only outgoing & data directories
-        # if direction not in ("outgoing", "data"):
-        #     continue 
-        
-        # Process only outgoing SMS directories
-        if direction != "outgoing" or service not in ("sms", "international call", 'cug call', 'national call'):
-            continue  # Only process relevant folders
+        service = infer_service(folder.parts)             
+                
+        # # Process only outgoing call directories
+        # if service != "call":
+        #     continue
 
         # Only log when entering a new direction folder
-        if folder != last_direction_folder:
-            logging.info(f"Processing folder: {folder} (direction: {direction})")
-            last_direction_folder = folder
+        if folder_key != last_direction_folder:
+            logging.info(f"Processing folder: {folder_key} (direction: {direction})")
+            last_direction_folder = folder_key
 
         file_date = extract_date_from_path(folder)
+        last_date = tracker.get(folder_key)
+        
         if file_date and file_date < LAUNCH_DAY:
             logging.debug(f"{folder}, pre_launch:{file_date}")
             continue
+        
+        if use_tracker and last_date:
+            try:
+                last_date_dt = datetime.strptime(last_date, "%Y-%m-%d").date()
+                if file_date and file_date <= last_date_dt:
+                    logging.debug(f"{folder}, tracker_date:{last_date}")
+                    continue
+            except Exception as e:
+                logging.debug(f"{folder}, tracker_date_parse_error:{e}")
 
         for file_path in folder.glob("*.txt"):
             tag, row = summarize_file(file_path)
             if row:
                 grouped_rows[tag].append(row)
+                
+        if file_date:
+            prev = latest_dates.get(folder_key)
+            if not prev or file_date > prev:
+                latest_dates[folder_key] = file_date
 
     for tag, rows in grouped_rows.items():
         df = pd.DataFrame(rows)
         out_file = output_dir / f"{tag}.csv"
         df.to_csv(out_file, index=False)
         logging.info(f"Saved: {out_file} ({len(df)} rows)")
+    
+    # Persist tracker updates
+    save_ingestion_tracker({k: v.strftime("%Y-%m-%d") for k, v in latest_dates.items()})
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("root_dir", help="Root directory containing all txt files")
     parser.add_argument("--outdir", default="./Files", help="Output folder for CSVs")
+    parser.add_argument("--config", default=CONFIG_FILE, help="Path to config file")
+    parser.add_argument("--no-tracker", action="store_true", help="Disable ingestion tracker (process all folders)")
     args = parser.parse_args()
 
-    process_folder(args.root_dir, args.outdir)
+    config = load_config(args.config)
+    process_folder(
+        args.root_dir,
+        args.outdir,
+        config.get("include_categories", []),
+        use_tracker=not args.no_tracker,
+    )
