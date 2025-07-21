@@ -112,28 +112,91 @@ def flexible_category_match(series, patterns):
     regex = "|".join([fr"\\b{p.replace('_', '[_-]?')}\\b" for p in patterns])
     return series.astype(str).str.lower().str.contains(regex, na=False, regex=True)
 
+
 def summarize_sim(df_inventory, df_activation):
+    import pandas as pd
+    from datetime import date
+    from dateutil.relativedelta import relativedelta
+
     logging.info("Summarizing SIM data...")
     summaries = {}
-    inventory_daily = df_inventory.copy()
-    if "allocation_date" in inventory_daily.columns:
-        sold = inventory_daily.groupby("allocation_date").size().rename("SIMs Sold")
-        sold = sold.to_frame().T
-        sold["Grand Total"] = sold.sum(axis=1)
-        sold = sold[["Grand Total"] + sorted([c for c in sold.columns if c != "Grand Total"], reverse=True)]
-        summaries["SIMs Sold"] = sold
+
+    def summarize_with_monthly(df, date_col, value_name):
+        df = df.copy()
+        df[date_col] = pd.to_datetime(df[date_col], errors="coerce").dt.date
+        df = df.dropna(subset=[date_col])
+        if df.empty:
+            logging.info(f"No valid dates found for {value_name}. Skipping.")
+            return pd.DataFrame()
+
+        today = date.today()
+        current_month = today.replace(day=1)
+
+        # Daily (current month)
+        full_days = pd.date_range(start=current_month, end=today).date
+        df_current = df[df[date_col] >= current_month]
+        daily_counts = df_current.groupby(date_col).size().reindex(full_days, fill_value=0)
+        daily_cols = [d.strftime("%d-%m-%Y") for d in daily_counts.index]
+        daily_vals = list(daily_counts)[::-1]
+        daily_cols = daily_cols[::-1]
+
+        # Monthly (prior months), with full range padded
+        df_past = df[df[date_col] < current_month]
+        if not df_past.empty:
+            df_past["month"] = pd.Series(df_past[date_col]).astype("datetime64[ns]").dt.to_period("M").dt.to_timestamp()
+            monthly_counts = df_past.groupby("month").size()
+
+            # Create full range from earliest to current-1
+            start_month = monthly_counts.index.min()
+            end_month = current_month - relativedelta(months=1)
+            full_months = pd.date_range(start=start_month, end=end_month, freq='MS')
+            monthly_counts = monthly_counts.reindex(full_months, fill_value=0)
+
+            full_months_desc = full_months[::-1]
+            month_names = [d.strftime("%b'%y") for d in full_months_desc]  # Descending order
+            monthly_vals = list(monthly_counts.reindex(full_months_desc, fill_value=0).values)
+
+        else:
+            month_names = []
+            monthly_vals = []
+
+        all_cols = daily_cols + month_names
+        all_vals = daily_vals + monthly_vals
+
+        summary = pd.DataFrame([all_vals], columns=all_cols)
+        summary["Grand Total"] = summary.sum(axis=1)
+        summary = summary[["Grand Total"] + all_cols]
+        summary.index = [value_name]
+        return summary
+
+    # SIMs Sold
+    if "allocation_date" in df_inventory.columns:
+        sold_summary = summarize_with_monthly(df_inventory, "allocation_date", "SIMs Sold")
+        if not sold_summary.empty:
+            summaries["SIMs Sold"] = sold_summary
+            logging.info("✔ SIMs Sold summary added.")
+        else:
+            logging.info("⚠ No data for SIMs Sold.")
+
+    # SIMs Activated (prepaid / postpaid)
     if "billing_type" not in df_inventory.columns:
         df_inventory["billing_type"] = "Prepaid"
-    for billing_type in ["prepaid", "postpaid"]:
-        df_act = df_activation[df_activation["customertype"].str.lower() == billing_type]
-        if df_act.empty:
-            logging.info(f"No activation data for {billing_type}.")
-            continue
-        activated = df_act.groupby("create_date").size().rename("SIMs Activated")
-        activated = activated.to_frame().T
-        activated["Grand Total"] = activated.sum(axis=1)
-        activated = activated[["Grand Total"] + sorted([c for c in activated.columns if c != "Grand Total"], reverse=True)]
-        summaries[billing_type] = activated
+
+    if "customertype" in df_activation.columns:
+        for billing_type in ["prepaid", "postpaid"]:
+            df_act = df_activation[df_activation["customertype"].str.lower() == billing_type]
+            if df_act.empty:
+                logging.info(f"⚠ No activation data for {billing_type}.")
+                continue
+
+            act_summary = summarize_with_monthly(df_act, "create_date", f"{billing_type.capitalize()} SIMs Activated")
+            if not act_summary.empty:
+                summaries[billing_type] = act_summary
+                logging.info(f"✔ {billing_type.capitalize()} SIMs Activated summary added.")
+            else:
+                logging.info(f"⚠ No rows for {billing_type} after summarization.")
+
+    logging.info(f"✅ Finished SIM summary with {len(summaries)} sections.")
     return summaries
 
 
@@ -219,25 +282,73 @@ def summarize_usage(df_calls, df_sms, df_data):
     return summaries
 
 def summarize_partner_activations(df_activations, df_partners):
+    import pandas as pd
+    from datetime import date
+    from dateutil.relativedelta import relativedelta
+
     logging.info("Summarizing partner SIM activations...")
     summaries = {}
+
+    today = date.today()
+    current_month = today.replace(day=1)
+    full_days = pd.date_range(start=current_month, end=today).date
+    full_day_strs = [d.strftime("%d-%m-%Y") for d in full_days][::-1]  # Newest to oldest
+
     for billing_type in ["prepaid", "postpaid"]:
         df = df_activations[df_activations["customertype"].str.lower() == billing_type].copy()
         if df.empty:
             logging.info(f"No partner activation data for {billing_type}.")
             continue
+
         df["partner_id"] = df["partner_id"].astype(str)
         df["create_date"] = pd.to_datetime(df["create_date"], errors="coerce", dayfirst=True).dt.date
         df_partners["id"] = df_partners["id"].astype(str)
         merged = df.merge(df_partners, left_on="partner_id", right_on="id", how="left")
-        if "business_name" not in merged.columns:
-            merged["business_name"] = "Unknown Partner"
-        daily = merged.groupby(["business_name", "create_date"]).size().unstack(fill_value=0).sort_index(axis=1)
-        daily["Grand Total"] = daily.sum(axis=1)
-        daily = daily[["Grand Total"] + sorted([c for c in daily.columns if c != "Grand Total"], reverse=True)]
-        daily = daily.loc[~(daily == 0).all(axis=1)]
-        summaries[billing_type] = daily
+        merged["business_name"] = merged.get("business_name", "Unknown Partner")
+
+        # Add 'month' and 'day' cols
+        merged["month"] = pd.to_datetime(merged["create_date"]).dt.to_period("M").dt.to_timestamp()
+        merged["day"] = pd.to_datetime(merged["create_date"]).dt.strftime("%d-%m-%Y")
+
+        # Separate current and past
+        current = merged[merged["create_date"] >= current_month]
+        past = merged[merged["create_date"] < current_month]
+
+        # --- Daily (current month)
+        daily = current.groupby(["business_name", "day"]).size().unstack(fill_value=0)
+        for day in full_day_strs:
+            if day not in daily.columns:
+                daily[day] = 0
+        daily = daily[full_day_strs]  # Order columns
+
+        # --- Monthly (previous months)
+        if not past.empty:
+            past["month"] = pd.to_datetime(past["create_date"]).dt.to_period("M").dt.to_timestamp()
+            monthly = past.groupby(["business_name", "month"]).size().unstack(fill_value=0)
+
+            # Pad all months
+            min_month = monthly.columns.min()
+            max_month = current_month - relativedelta(months=1)
+            full_months = pd.date_range(start=min_month, end=max_month, freq="MS")[::-1]  # Descending
+            month_labels = [d.strftime("%b'%y") for d in full_months]
+
+            for ts, label in zip(full_months, month_labels):
+                if ts not in monthly.columns:
+                    monthly[ts] = 0
+            monthly = monthly[full_months]
+            monthly.columns = month_labels
+        else:
+            monthly = pd.DataFrame()
+
+        # --- Combine
+        combined = pd.concat([daily, monthly], axis=1).fillna(0).astype(int)
+        combined["Grand Total"] = combined.sum(axis=1)
+        combined = combined[["Grand Total"] + [c for c in combined.columns if c != "Grand Total"]]
+        combined = combined.loc[~(combined == 0).all(axis=1)]  # Drop zero rows
+        summaries[billing_type] = combined
+
     return summaries
+
 
 def generate_historical_summaries(dfs):
     import datetime
